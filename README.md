@@ -2,6 +2,12 @@
 
 vitaMania! is an unofficial PS Vita homebrew rhythm game for 4k osu!mania beatmaps.
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/498ac4a6-83d5-4a4d-845c-28ba3f584fe0" alt="vitaMania song select" width="45%">
+  <img src="https://github.com/user-attachments/assets/2c1498a3-0c28-41e0-b835-2662fd559a32" alt="vitaMania gameplay" width="45%">
+</p>
+
+
 ## How To Install
 
 1. Copy `VitaMania.vpk` to your PS Vita.
