@@ -1,0 +1,9 @@
+build/
+build-*/
+*.vpk
+*.velf
+*.self
+*.out
+eboot.bin
+*.sfo
+.DS_Store
