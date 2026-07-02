@@ -13,15 +13,15 @@ ux0:data/vitamania/
 ```
 
 4. Drop `.osz` beatmap archives directly into `ux0:data/vitamania/`.
-5. Launch VitaMania. The first scan may take a while if you added new `.osz` files.
+5. Launch vitaMania!. The first scan may take a while if you added new `.osz` files.
 
-VitaMania automatically extracts `.osz` archives into:
+vitaMania! automatically extracts `.osz` archives into:
 
 ```text
 ux0:data/vitamania/Songs/
 ```
 
-After an archive extracts successfully and contains a playable `.osu`, VitaMania deletes the original `.osz`. You can also copy already-unzipped beatmap folders directly into `ux0:data/vitamania/Songs/`.
+After an archive extracts successfully and contains a playable `.osu`, vitaMania! deletes the original `.osz`. You can also copy already-unzipped beatmap folders directly into `ux0:data/vitamania/Songs/`.
 
 ## Current Scope
 
