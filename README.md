@@ -1,6 +1,6 @@
-# VitaMania
+# vitaMania!
 
-VitaMania is an unofficial PS Vita homebrew rhythm game for four-lane osu!mania beatmaps.
+vitaMania! is an unofficial PS Vita homebrew rhythm game for 4k osu!mania beatmaps.
 
 ## How To Install
 
@@ -42,28 +42,6 @@ After an archive extracts successfully and contains a playable `.osu`, VitaMania
 - Falls back to Vita AvPlayer for non-MP3 audio files when the system codec accepts them.
 - Ignores beatmap video events and uses the beatmap's image background instead.
 
-## Beatmap Folder Layout
-
-Install the VPK, then copy `.osz` archives into the VitaMania data folder:
-
-```text
-ux0:data/vitamania/
-  Artist - Song.osz
-  Songs/
-```
-
-On the next scan, VitaMania unpacks the archive into `Songs/` and removes the `.osz` after extraction succeeds:
-
-```text
-ux0:data/vitamania/
-  Songs/
-    Artist - Song/
-      Artist - Song (Creator) [Difficulty].osu
-      audio.mp3 or audio.ogg
-```
-
-You can also copy already-unzipped beatmap folders directly into `ux0:data/vitamania/Songs/`. The first scan after adding new songs can take a while.
-
 ## Controls
 
 Song select:
@@ -83,7 +61,6 @@ Gameplay:
 ```text
 Start         Pause
 Default lanes L, D-pad Down, X, R
-Resume uses a 3-count before the chart continues
 ```
 
 Pause menu:
@@ -107,4 +84,4 @@ The build outputs `VitaMania.vpk` in the build directory.
 ## Notes
 
 This is a compatibility player, not an official osu! project. It does not ship music or beatmaps.
-The only official data path is `ux0:data/vitamania/`. Older `ux0:data/osuvita/` folders are not scanned.
+The only official data path is `ux0:data/vitamania/`.
