@@ -76,5 +76,3 @@ This is a compatibility player, not an official osu! project. It does not ship m
 
 You can download your own beatmaps from the official osu! beatmap listing:
 https://osu.ppy.sh/beatmapsets?m=3
-
-The only official data path is `ux0:data/vitamania/`.
