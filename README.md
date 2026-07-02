@@ -2,37 +2,67 @@
 
 VitaMania is an unofficial PS Vita homebrew rhythm game for four-lane osu!mania beatmaps.
 
+## How To Install
+
+1. Copy `VitaMania.vpk` to your PS Vita.
+2. Install the VPK with VitaShell.
+3. Create this data folder if it does not already exist:
+
+```text
+ux0:data/vitamania/
+```
+
+4. Drop `.osz` beatmap archives directly into `ux0:data/vitamania/`.
+5. Launch VitaMania. The first scan may take a while if you added new `.osz` files.
+
+VitaMania automatically extracts `.osz` archives into:
+
+```text
+ux0:data/vitamania/Songs/
+```
+
+After an archive extracts successfully and contains a playable `.osu`, VitaMania deletes the original `.osz`. You can also copy already-unzipped beatmap folders directly into `ux0:data/vitamania/Songs/`.
+
 ## Current Scope
 
 - Four lanes mapped to `L`, `D-pad Down`, `X`, and `R`.
 - Rebindable lane controls from the in-app options menu.
-- Reads unzipped beatmap folders from `ux0:data/osuvita/Songs/`.
-- Also scans `ux0:data/vitamania/Songs/` as a fallback path.
+- Uses `ux0:data/vitamania/` as the only VitaMania data path.
+- Automatically extracts `.osz` archives from `ux0:data/vitamania/` into `ux0:data/vitamania/Songs/`, then deletes the archive after the extracted folder contains a playable `.osu`.
+- Reads playable beatmap folders from `ux0:data/vitamania/Songs/`.
 - Supports native 4K osu!mania, converts other mania key counts to 4K, and converts osu!standard maps to 4K.
 - Parses normal notes, hold notes, sliders, and spinners into VitaMania's four-lane playfield.
 - Groups multiple difficulties for the same beatmap set into one song entry.
-- Shows `.jpg` and `.jpeg` beatmap backgrounds as async thumbnails in song select when background previews are enabled.
+- Shows beatmap image backgrounds as async thumbnails in song select. Background previews are on by default.
 - Plays delayed song previews while browsing the library.
 - Saves and displays best score, accuracy, max combo, and play count per difficulty.
-- Parses storyboard/event samples and explicit per-note custom `.wav` samples.
-- Preloads custom `.wav` samples at song start to avoid mid-chart stalls.
-- Includes pause, restart, music volume, and hit sound volume controls.
+- Includes pause, restart, music volume, background toggle, and lane binding controls.
 - Plays `.mp3` beatmap audio through Vita's native MP3 decoder.
 - Plays `.ogg`/Vorbis beatmap audio through a bundled software decoder.
 - Falls back to Vita AvPlayer for non-MP3 audio files when the system codec accepts them.
+- Ignores beatmap video events and uses the beatmap's image background instead.
 
 ## Beatmap Folder Layout
 
-Install the VPK, then copy unzipped beatmap folders like this:
+Install the VPK, then copy `.osz` archives into the VitaMania data folder:
 
 ```text
-ux0:data/osuvita/Songs/
-  Artist - Song/
-    Artist - Song (Creator) [Difficulty].osu
-    audio.mp3 or audio.ogg
+ux0:data/vitamania/
+  Artist - Song.osz
+  Songs/
 ```
 
-The app does not extract `.osz` files yet. Unzip them on a computer first and copy the extracted folder.
+On the next scan, VitaMania unpacks the archive into `Songs/` and removes the `.osz` after extraction succeeds:
+
+```text
+ux0:data/vitamania/
+  Songs/
+    Artist - Song/
+      Artist - Song (Creator) [Difficulty].osu
+      audio.mp3 or audio.ogg
+```
+
+You can also copy already-unzipped beatmap folders directly into `ux0:data/vitamania/Songs/`. The first scan after adding new songs can take a while.
 
 ## Controls
 
@@ -44,7 +74,7 @@ Left/Right    Select difficulty
 X             Play
 Square        Options
 Triangle      Rescan songs
-Select        Toggle background previews, off by default
+Select        Toggle background previews, on by default
 Circle        Quit
 ```
 
@@ -77,4 +107,4 @@ The build outputs `VitaMania.vpk` in the build directory.
 ## Notes
 
 This is a compatibility player, not an official osu! project. It does not ship music or beatmaps.
-Video filenames are detected for beatmap sets, but full video background playback is still future work.
+The only official data path is `ux0:data/vitamania/`. Older `ux0:data/osuvita/` folders are not scanned.

@@ -1,4 +1,5 @@
 #include <psp2/ctrl.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr/mutex.h>
@@ -16,6 +17,7 @@
 #include <jpeglib.h>
 #include <png.h>
 #include <setjmp.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <cmath>
@@ -45,6 +47,7 @@ typedef struct {
     int max_frame_size;
 } stb_vorbis_info;
 stb_vorbis *stb_vorbis_open_filename(const char *filename, int *error, const stb_vorbis_alloc *alloc);
+stb_vorbis *stb_vorbis_open_memory(const unsigned char *data, int len, int *error, const stb_vorbis_alloc *alloc);
 stb_vorbis_info stb_vorbis_get_info(stb_vorbis *f);
 int stb_vorbis_seek(stb_vorbis *f, unsigned int sample_number);
 int stb_vorbis_get_samples_short_interleaved(stb_vorbis *f, int channels, short *buffer, int num_shorts);
@@ -57,8 +60,8 @@ constexpr int SCREEN_W = 960;
 constexpr int SCREEN_H = 544;
 constexpr int LANE_COUNT = 4;
 
-constexpr const char *PRIMARY_SONGS_DIR = "ux0:data/osuvita/Songs";
-constexpr const char *FALLBACK_SONGS_DIR = "ux0:data/vitamania/Songs";
+constexpr const char *DATA_DIR = "ux0:data/vitamania";
+constexpr const char *SONGS_DIR = "ux0:data/vitamania/Songs";
 constexpr const char *SCORES_PATH = "ux0:data/vitamania/scores.tsv";
 constexpr const char *SKIN_DIR = "app0:skin";
 constexpr int PREVIEW_START_DELAY_MS = 120;
@@ -232,10 +235,8 @@ bool fileExists(const std::string &path) {
 }
 
 void ensureDirectories() {
-    sceIoMkdir("ux0:data/osuvita", 0777);
-    sceIoMkdir(PRIMARY_SONGS_DIR, 0777);
-    sceIoMkdir("ux0:data/vitamania", 0777);
-    sceIoMkdir(FALLBACK_SONGS_DIR, 0777);
+    sceIoMkdir(DATA_DIR, 0777);
+    sceIoMkdir(SONGS_DIR, 0777);
 }
 
 void drawText(vita2d_pgf *font, int x, int y, uint32_t color, float scale, const char *fmt, ...) {
@@ -402,6 +403,16 @@ std::string replaceExtension(const std::string &path, const char *extension) {
         return path + extension;
     }
     return path.substr(0, dot) + extension;
+}
+
+std::string filenameWithoutExtension(const std::string &path) {
+    size_t slash = path.find_last_of('/');
+    size_t start = slash == std::string::npos ? 0 : slash + 1;
+    size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos || dot < start) {
+        return path.substr(start);
+    }
+    return path.substr(start, dot - start);
 }
 
 float recommendedScrollSpeed(const std::vector<Note> &notes) {
@@ -911,10 +922,352 @@ ParseResult parseOsuFile(const std::string &path, const std::string &folder) {
     return result;
 }
 
+uint16_t readZip16(const uint8_t *p) {
+    return static_cast<uint16_t>(p[0] | (p[1] << 8));
+}
+
+uint32_t readZip32(const uint8_t *p) {
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+bool readFileBytes(const std::string &path, std::vector<uint8_t> *bytes) {
+    FILE *file = std::fopen(path.c_str(), "rb");
+    if (!file) {
+        return false;
+    }
+
+    std::fseek(file, 0, SEEK_END);
+    long size = std::ftell(file);
+    std::fseek(file, 0, SEEK_SET);
+    if (size < 0) {
+        std::fclose(file);
+        return false;
+    }
+
+    bytes->resize(static_cast<size_t>(size));
+    if (size > 0) {
+        size_t read = std::fread(bytes->data(), 1, bytes->size(), file);
+        if (read != bytes->size()) {
+            std::fclose(file);
+            return false;
+        }
+    }
+
+    std::fclose(file);
+    return true;
+}
+
+bool ensureDirectoryPath(const std::string &path) {
+    if (path.empty()) {
+        return true;
+    }
+
+    size_t pos = 0;
+    while (true) {
+        pos = path.find('/', pos + 1);
+        std::string part = pos == std::string::npos ? path : path.substr(0, pos);
+        if (!part.empty()) {
+            sceIoMkdir(part.c_str(), 0777);
+        }
+        if (pos == std::string::npos) {
+            break;
+        }
+    }
+    return true;
+}
+
+bool ensureParentDirectory(const std::string &path) {
+    size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos) {
+        return true;
+    }
+    return ensureDirectoryPath(path.substr(0, slash));
+}
+
+bool writeFileBytes(const std::string &path, const uint8_t *data, size_t size) {
+    ensureParentDirectory(path);
+    FILE *file = std::fopen(path.c_str(), "wb");
+    if (!file) {
+        return false;
+    }
+    if (size > 0 && std::fwrite(data, 1, size, file) != size) {
+        std::fclose(file);
+        return false;
+    }
+    std::fclose(file);
+    return true;
+}
+
+bool safeZipEntryPath(const std::string &rawName, std::string *safePath) {
+    std::string name = rawName;
+    std::replace(name.begin(), name.end(), '\\', '/');
+    while (!name.empty() && name.front() == '/') {
+        name.erase(name.begin());
+    }
+    if (name.empty() || name.find(':') != std::string::npos) {
+        return false;
+    }
+
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (start <= name.size()) {
+        size_t slash = name.find('/', start);
+        std::string part = slash == std::string::npos ? name.substr(start) : name.substr(start, slash - start);
+        if (!part.empty() && part != ".") {
+            if (part == "..") {
+                return false;
+            }
+            parts.push_back(part);
+        }
+        if (slash == std::string::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+
+    if (parts.empty()) {
+        return false;
+    }
+
+    std::string out = parts[0];
+    for (size_t i = 1; i < parts.size(); i++) {
+        out = joinPath(out, parts[i]);
+    }
+    *safePath = out;
+    return true;
+}
+
+bool shouldSkipZipEntry(const std::string &safePath) {
+    std::string lower = lowerCopy(safePath);
+    return lower == "__macosx" ||
+           lower.compare(0, 9, "__macosx/") == 0 ||
+           lower == ".ds_store" ||
+           (lower.size() > 10 && lower.compare(lower.size() - 10, 10, "/.ds_store") == 0);
+}
+
+bool findZipEndOfCentralDirectory(const std::vector<uint8_t> &archive, size_t *offset) {
+    if (archive.size() < 22) {
+        return false;
+    }
+
+    size_t minimum = archive.size() > 65557 ? archive.size() - 65557 : 0;
+    size_t pos = archive.size() - 22;
+    while (true) {
+        if (pos + 22 <= archive.size() &&
+            archive[pos] == 0x50 && archive[pos + 1] == 0x4b &&
+            archive[pos + 2] == 0x05 && archive[pos + 3] == 0x06) {
+            uint16_t commentLength = readZip16(&archive[pos + 20]);
+            if (pos + 22 + commentLength <= archive.size()) {
+                *offset = pos;
+                return true;
+            }
+        }
+        if (pos == minimum) {
+            break;
+        }
+        pos--;
+    }
+    return false;
+}
+
+bool inflateZipBytes(const uint8_t *compressed, size_t compressedSize, std::vector<uint8_t> *out) {
+    if (out->empty()) {
+        return true;
+    }
+
+    z_stream stream{};
+    stream.next_in = const_cast<Bytef *>(compressed);
+    stream.avail_in = static_cast<uInt>(compressedSize);
+    stream.next_out = out->data();
+    stream.avail_out = static_cast<uInt>(out->size());
+
+    if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) {
+        return false;
+    }
+    int status = inflate(&stream, Z_FINISH);
+    inflateEnd(&stream);
+    return status == Z_STREAM_END && stream.total_out == out->size();
+}
+
+bool extractZipEntry(const std::vector<uint8_t> &archive,
+                     const std::string &targetDir,
+                     const std::string &safePath,
+                     uint16_t method,
+                     uint32_t compressedSize,
+                     uint32_t uncompressedSize,
+                     uint32_t localHeaderOffset) {
+    if (localHeaderOffset + 30 > archive.size()) {
+        return false;
+    }
+    const uint8_t *local = &archive[localHeaderOffset];
+    if (readZip32(local) != 0x04034b50) {
+        return false;
+    }
+
+    uint16_t localNameLength = readZip16(local + 26);
+    uint16_t localExtraLength = readZip16(local + 28);
+    size_t dataOffset = static_cast<size_t>(localHeaderOffset) + 30 + localNameLength + localExtraLength;
+    if (dataOffset > archive.size() || dataOffset + compressedSize > archive.size()) {
+        return false;
+    }
+
+    std::string outPath = joinPath(targetDir, safePath);
+    if (method == 0) {
+        const uint8_t *data = compressedSize == 0 ? nullptr : &archive[dataOffset];
+        return writeFileBytes(outPath, data, compressedSize);
+    }
+    if (method != 8) {
+        return false;
+    }
+
+    std::vector<uint8_t> inflated(uncompressedSize);
+    const uint8_t *data = compressedSize == 0 ? nullptr : &archive[dataOffset];
+    if (!inflateZipBytes(data, compressedSize, &inflated)) {
+        return false;
+    }
+    return writeFileBytes(outPath, inflated.empty() ? nullptr : inflated.data(), inflated.size());
+}
+
+bool directoryContainsOsuFile(const std::string &dir, int depth = 0) {
+    if (depth > 5) {
+        return false;
+    }
+
+    DIR *handle = opendir(dir.c_str());
+    if (!handle) {
+        return false;
+    }
+
+    bool found = false;
+    while (!found) {
+        dirent *entry = readdir(handle);
+        if (!entry) {
+            break;
+        }
+
+        std::string name(entry->d_name);
+        if (name == "." || name == "..") {
+            continue;
+        }
+
+        std::string path = joinPath(dir, name);
+        if (isDirectory(path)) {
+            found = directoryContainsOsuFile(path, depth + 1);
+        } else if (endsWithNoCase(name, ".osu")) {
+            found = true;
+        }
+    }
+
+    closedir(handle);
+    return found;
+}
+
+bool extractOszArchive(const std::string &path, const std::string &destinationRoot) {
+    std::vector<uint8_t> archive;
+    if (!readFileBytes(path, &archive)) {
+        return false;
+    }
+
+    size_t eocdOffset = 0;
+    if (!findZipEndOfCentralDirectory(archive, &eocdOffset)) {
+        return false;
+    }
+
+    const uint8_t *eocd = &archive[eocdOffset];
+    uint16_t entryCount = readZip16(eocd + 10);
+    uint32_t centralDirOffset = readZip32(eocd + 16);
+    if (centralDirOffset >= archive.size()) {
+        return false;
+    }
+
+    std::string targetDir = joinPath(destinationRoot, filenameWithoutExtension(path));
+    ensureDirectoryPath(targetDir);
+
+    bool extractedAny = false;
+    size_t offset = centralDirOffset;
+    for (uint16_t i = 0; i < entryCount; i++) {
+        if (offset + 46 > archive.size()) {
+            return false;
+        }
+        const uint8_t *central = &archive[offset];
+        if (readZip32(central) != 0x02014b50) {
+            return false;
+        }
+
+        uint16_t flags = readZip16(central + 8);
+        uint16_t method = readZip16(central + 10);
+        uint32_t compressedSize = readZip32(central + 20);
+        uint32_t uncompressedSize = readZip32(central + 24);
+        uint16_t nameLength = readZip16(central + 28);
+        uint16_t extraLength = readZip16(central + 30);
+        uint16_t commentLength = readZip16(central + 32);
+        uint32_t localHeaderOffset = readZip32(central + 42);
+        size_t nextOffset = offset + 46 + nameLength + extraLength + commentLength;
+        if (nextOffset > archive.size() || offset + 46 + nameLength > archive.size()) {
+            return false;
+        }
+
+        std::string rawName(reinterpret_cast<const char *>(&archive[offset + 46]), nameLength);
+        bool isDirectoryEntry = !rawName.empty() && (rawName.back() == '/' || rawName.back() == '\\');
+        std::string safePath;
+        if (!safeZipEntryPath(rawName, &safePath)) {
+            return false;
+        }
+
+        if (!shouldSkipZipEntry(safePath)) {
+            if (isDirectoryEntry) {
+                ensureDirectoryPath(joinPath(targetDir, safePath));
+            } else {
+                if ((flags & 0x0001) != 0) {
+                    return false;
+                }
+                if (!extractZipEntry(archive, targetDir, safePath, method, compressedSize, uncompressedSize, localHeaderOffset)) {
+                    return false;
+                }
+                extractedAny = true;
+            }
+        }
+
+        offset = nextOffset;
+    }
+
+    return extractedAny && directoryContainsOsuFile(targetDir);
+}
+
+void extractOszFilesInDir(const std::string &dir, const std::string &destinationRoot) {
+    DIR *handle = opendir(dir.c_str());
+    if (!handle) {
+        return;
+    }
+
+    std::vector<std::string> archives;
+    while (dirent *entry = readdir(handle)) {
+        std::string name(entry->d_name);
+        if (name == "." || name == ".." || !endsWithNoCase(name, ".osz")) {
+            continue;
+        }
+        archives.push_back(joinPath(dir, name));
+    }
+    closedir(handle);
+
+    for (const std::string &archivePath : archives) {
+        if (extractOszArchive(archivePath, destinationRoot)) {
+            if (sceIoRemove(archivePath.c_str()) < 0) {
+                std::remove(archivePath.c_str());
+            }
+        }
+    }
+}
+
 void scanDirForMaps(const std::string &dir, int depth, std::vector<Beatmap> *maps, int *skipped, int *skippedNon4K) {
     if (depth > 5) {
         return;
     }
+
+    extractOszFilesInDir(dir, dir);
 
     DIR *handle = opendir(dir.c_str());
     if (!handle) {
@@ -1054,10 +1407,10 @@ const Beatmap *selectedBeatmap(const Library &library) {
 
 Library scanLibrary() {
     ensureDirectories();
+    extractOszFilesInDir(DATA_DIR, SONGS_DIR);
 
     Library library;
-    scanDirForMaps(PRIMARY_SONGS_DIR, 0, &library.maps, &library.skipped, &library.skippedNon4K);
-    scanDirForMaps(FALLBACK_SONGS_DIR, 0, &library.maps, &library.skipped, &library.skippedNon4K);
+    scanDirForMaps(SONGS_DIR, 0, &library.maps, &library.skipped, &library.skippedNon4K);
     for (const Beatmap &map : library.maps) {
         if (map.converted) {
             library.convertedDifficulties++;
@@ -1115,6 +1468,35 @@ public:
         if (endsWithNoCase(targetPath_, ".jpg") || endsWithNoCase(targetPath_, ".jpeg") ||
             endsWithNoCase(targetPath_, ".png") || endsWithNoCase(targetPath_, ".bmp")) {
             requestDecode(targetPath_);
+        } else {
+            current_ = nullptr;
+            currentPath_ = targetPath_;
+        }
+    }
+
+    void preloadNow(const std::string &path) {
+        stopWorker();
+
+        if (path.empty()) {
+            clear();
+            return;
+        }
+
+        targetPath_ = path;
+        targetChangedAtMs_ = nowMs();
+        if (targetPath_ == currentPath_) {
+            return;
+        }
+        if (useCached(targetPath_)) {
+            return;
+        }
+
+        if (endsWithNoCase(targetPath_, ".jpg") || endsWithNoCase(targetPath_, ".jpeg") ||
+            endsWithNoCase(targetPath_, ".png") || endsWithNoCase(targetPath_, ".bmp")) {
+            DecodedImage image;
+            image.path = targetPath_;
+            decodeImageThumbnail(targetPath_, &image);
+            replaceTexture(image);
         } else {
             current_ = nullptr;
             currentPath_ = targetPath_;
@@ -2568,6 +2950,24 @@ public:
         preloadCache_ = cache;
     }
 
+    void preloadForPlay(const std::string &path) {
+#ifndef VITAMANIA_NO_AVPLAYER
+        preloadedAudioPath_.clear();
+        preloadedAudioData_.clear();
+        if (path.empty() || (!endsWithNoCase(path, ".mp3") && !endsWithNoCase(path, ".ogg"))) {
+            return;
+        }
+
+        std::vector<uint8_t> data;
+        if (readFile(path, &data)) {
+            preloadedAudioPath_ = path;
+            preloadedAudioData_ = std::move(data);
+        }
+#else
+        (void)path;
+#endif
+    }
+
     bool play(const std::string &path, std::string *error, int startOffsetMs = 0) {
 #ifdef VITAMANIA_NO_AVPLAYER
         (void)path;
@@ -2821,7 +3221,10 @@ private:
     }
 
     bool playMp3(const std::string &path, std::string *error) {
-        if ((!preloadCache_ || !preloadCache_->get(path, &mp3Data_)) && !readFile(path, &mp3Data_)) {
+        if (preloadedAudioPath_ == path && !preloadedAudioData_.empty()) {
+            mp3Data_ = std::move(preloadedAudioData_);
+            preloadedAudioPath_.clear();
+        } else if ((!preloadCache_ || !preloadCache_->get(path, &mp3Data_)) && !readFile(path, &mp3Data_)) {
             if (error) {
                 *error = "Could not read MP3";
             }
@@ -2894,6 +3297,12 @@ private:
 
     bool playOgg(const std::string &path, std::string *error) {
         oggPath_ = path;
+        if (preloadedAudioPath_ == path && !preloadedAudioData_.empty()) {
+            oggData_ = std::move(preloadedAudioData_);
+            preloadedAudioPath_.clear();
+        } else {
+            oggData_.clear();
+        }
         oggStopRequested_ = false;
         oggPaused_ = false;
         pauseStartedAtMs_ = 0;
@@ -3022,6 +3431,7 @@ private:
         oggActive_ = false;
         oggPaused_ = false;
         oggPath_.clear();
+        oggData_.clear();
     }
 
     static int mp3ThreadEntry(SceSize args, void *argp) {
@@ -3048,7 +3458,12 @@ private:
 
     int oggThreadMain() {
         int error = 0;
-        stb_vorbis *vorbis = stb_vorbis_open_filename(oggPath_.c_str(), &error, nullptr);
+        stb_vorbis *vorbis = nullptr;
+        if (!oggData_.empty()) {
+            vorbis = stb_vorbis_open_memory(oggData_.data(), static_cast<int>(oggData_.size()), &error, nullptr);
+        } else {
+            vorbis = stb_vorbis_open_filename(oggPath_.c_str(), &error, nullptr);
+        }
         if (!vorbis) {
             oggActive_ = false;
             active_ = false;
@@ -3274,6 +3689,9 @@ private:
     bool mp3LibraryOwned_ = false;
     std::vector<uint8_t> mp3Data_;
     std::string oggPath_;
+    std::vector<uint8_t> oggData_;
+    std::string preloadedAudioPath_;
+    std::vector<uint8_t> preloadedAudioData_;
 #endif
 
     bool active_ = false;
@@ -3686,6 +4104,16 @@ void releaseLane(PlayState *play, int lane, int ms) {
             note.complete = true;
             note.activeHold = false;
             addJudge(play, Judge::Miss, ms);
+        } else {
+            int absDelta = std::abs(ms - note.endMs);
+            Judge judge = judgeForDelta(absDelta, play->windows);
+            if (judge == Judge::Miss) {
+                finishNoteMiss(play, &note, ms);
+            } else {
+                note.complete = true;
+                note.activeHold = false;
+                addJudge(play, judge, ms);
+            }
         }
         return;
     }
@@ -3726,6 +4154,11 @@ void updatePlaying(PlayState *play, int ms, const bool laneDown[LANE_COUNT], Sam
                 note.complete = true;
                 note.activeHold = false;
                 addJudge(play, Judge::Marvelous, ms);
+                continue;
+            }
+
+            if (ms > note.endMs + play->windows.miss) {
+                finishNoteMiss(play, &note, ms);
             }
         }
     }
@@ -3817,7 +4250,7 @@ void drawLibrary(vita2d_pgf *font, const Library &library, BackgroundManager *ba
         vita2d_draw_rectangle(76, 180, 808, 188, RGBA8(21, 29, 39, 232));
         vita2d_draw_rectangle(76, 180, 808, 4, RGBA8(118, 245, 215, 255));
         drawText(font, 110, 240, RGBA8(238, 248, 255, 255), 1.08f, "No playable osu maps found");
-        drawText(font, 110, 284, RGBA8(170, 190, 198, 255), 0.76f, "Copy unzipped beatmap folders into ux0:data/osuvita/Songs/");
+        drawText(font, 110, 284, RGBA8(170, 190, 198, 255), 0.76f, "Drop .osz files in ux0:data/vitamania; folders go in Songs/");
         drawText(font, 110, 318, RGBA8(170, 190, 198, 255), 0.76f, "Native 4K, other mania keys, and standard maps are playable.");
         return;
     }
@@ -3920,7 +4353,7 @@ void drawLaneBoard(vita2d_pgf *font, const PlayState &play, int ms, const bool l
     }
     vita2d_draw_rectangle(boardX + boardW, boardY, 1, laneH, RGBA8(142, 160, 174, 92));
     for (const Note &note : play.map.notes) {
-        if (note.complete && (!note.hold || ms > note.endMs + 350)) {
+        if (note.complete && (!note.hold || !note.missed || ms > note.endMs + 350)) {
             continue;
         }
 
@@ -3932,18 +4365,26 @@ void drawLaneBoard(vita2d_pgf *font, const PlayState &play, int ms, const bool l
         if (note.hold) {
             float top = std::min(yStart, yEnd);
             float bottom = std::max(yStart, yEnd);
+            if (note.headHit && !note.missed) {
+                bottom = std::min(bottom, receptorY);
+            }
             if (bottom < boardY - 50 || top > boardY + laneH + 60) {
                 continue;
             }
-            float bodyH = std::max(8.0f, bottom - top);
-            uint32_t bodyTint = note.headHit ? RGBA8(255, 255, 255, 170) : RGBA8(255, 255, 255, 232);
-            vita2d_texture *bodyTexture = skin.holdTailForLane(note.lane);
-            if (bodyTexture) {
-                Skin::drawFit(bodyTexture, x, top, noteW, bodyH, bodyTint);
-            } else {
-                vita2d_draw_rectangle(x + 11.0f, top, noteW - 22.0f, bodyH, note.headHit ? RGBA8(236, 87, 170, 150) : RGBA8(255, 230, 0, 190));
+            float bodyH = bottom - top;
+            if (bodyH > 1.0f) {
+                if (!note.headHit || note.missed) {
+                    bodyH = std::max(8.0f, bodyH);
+                }
+                uint32_t bodyTint = note.headHit ? RGBA8(255, 255, 255, 170) : RGBA8(255, 255, 255, 232);
+                vita2d_texture *bodyTexture = skin.holdTailForLane(note.lane);
+                if (bodyTexture) {
+                    Skin::drawFit(bodyTexture, x, top, noteW, bodyH, bodyTint);
+                } else {
+                    vita2d_draw_rectangle(x + 11.0f, top, noteW - 22.0f, bodyH, note.headHit ? RGBA8(236, 87, 170, 150) : RGBA8(255, 230, 0, 190));
+                }
+                vita2d_draw_rectangle(x + noteW * 0.47f, top, noteW * 0.06f, bodyH, RGBA8(0, 0, 0, 90));
             }
-            vita2d_draw_rectangle(x + noteW * 0.47f, top, noteW * 0.06f, bodyH, RGBA8(0, 0, 0, 90));
             if (!note.headHit) {
                 vita2d_texture *head = skin.holdHeadForLane(note.lane);
                 if (head) {
@@ -4234,19 +4675,22 @@ void drawOptions(vita2d_pgf *font, const Settings &settings, int selected, int c
     }
 }
 
-void drawLoading(vita2d_pgf *font, const Skin &skin, const char *message) {
+void drawLoading(vita2d_pgf *font, const Skin &skin, const char *message, const char *detail = nullptr) {
     float pulse = wave01(1200.0f);
 
     vita2d_draw_rectangle(0, 0, SCREEN_W, SCREEN_H, RGBA8(0, 0, 0, 255));
     vita2d_draw_rectangle(0, 0, SCREEN_W, SCREEN_H, RGBA8(3, 5, 11, 255));
     Skin::drawCentered(skin.modeMania, SCREEN_W * 0.5f, 246.0f, 82.0f + pulse * 8.0f, 82.0f + pulse * 8.0f, RGBA8(255, 255, 255, 238));
     drawTextCentered(font, SCREEN_W / 2, 326, RGBA8(245, 250, 252, 255), 1.04f, "%s", message);
+    if (detail && detail[0]) {
+        drawTextCentered(font, SCREEN_W / 2, 362, RGBA8(170, 190, 200, 230), 0.62f, "%s", detail);
+    }
 }
 
-void presentLoading(vita2d_pgf *font, const Skin &skin, const char *message) {
+void presentLoading(vita2d_pgf *font, const Skin &skin, const char *message, const char *detail = nullptr) {
     vita2d_start_drawing();
     vita2d_clear_screen();
-    drawLoading(font, skin, message);
+    drawLoading(font, skin, message, detail);
     vita2d_end_drawing();
     vita2d_swap_buffers();
     sceKernelDelayThread(16000);
@@ -4264,7 +4708,7 @@ int main() {
     Skin skin;
     skin.load();
 
-    presentLoading(font, skin, "Scanning songs");
+    presentLoading(font, skin, "Scanning songs", "This might take a while if you added new .osz files");
     Library library = scanLibrary();
     Scene scene = Scene::Library;
     PlayState play;
@@ -4315,7 +4759,7 @@ int main() {
                 scene = Scene::Options;
             }
             if (pressed & SCE_CTRL_TRIANGLE) {
-                presentLoading(font, skin, "Refreshing library");
+                presentLoading(font, skin, "Refreshing library", "This might take a while if you added new .osz files");
                 library = scanLibrary();
             }
             if (pressed & SCE_CTRL_SELECT) {
@@ -4349,6 +4793,7 @@ int main() {
                     if (map) {
                         presentLoading(font, skin, "Loading beatmap");
                         previewAudio.stop();
+                        previewCache.stop();
                         previewPlayingPath.clear();
                         previewTargetPath.clear();
                         previewPlayingOffset = -1;
@@ -4356,7 +4801,8 @@ int main() {
                         audio.setMusicVolume(settings.musicVolume);
                         samples.clearVoices();
                         preparePlay(*map, &play, &audio, &samples);
-                        background.setPath(settings.backgrounds ? play.map.backgroundPath : "");
+                        audio.preloadForPlay(play.map.audioPath);
+                        background.preloadNow(settings.backgrounds ? play.map.backgroundPath : "");
                         countdownStartMs = nowMs();
                         countdownStartsAudio = true;
                         scene = Scene::Countdown;
@@ -4481,9 +4927,13 @@ int main() {
                 } else if (pauseSelected == 1) {
                     Beatmap restartMap = play.map;
                     presentLoading(font, skin, "Restarting");
+                    previewAudio.stop();
+                    previewCache.stop();
                     samples.clearVoices();
                     audio.setMusicVolume(settings.musicVolume);
                     preparePlay(restartMap, &play, &audio, &samples);
+                    audio.preloadForPlay(play.map.audioPath);
+                    background.preloadNow(settings.backgrounds ? play.map.backgroundPath : "");
                     countdownStartMs = nowMs();
                     countdownStartsAudio = true;
                     scene = Scene::Countdown;
@@ -4520,6 +4970,7 @@ int main() {
                 Beatmap replayMap = play.map;
                 presentLoading(font, skin, "Loading replay");
                 previewAudio.stop();
+                previewCache.stop();
                 previewPlayingPath.clear();
                 previewTargetPath.clear();
                 previewPlayingOffset = -1;
@@ -4527,6 +4978,8 @@ int main() {
                 samples.clearVoices();
                 audio.setMusicVolume(settings.musicVolume);
                 preparePlay(replayMap, &play, &audio, &samples);
+                audio.preloadForPlay(play.map.audioPath);
+                background.preloadNow(settings.backgrounds ? play.map.backgroundPath : "");
                 countdownStartMs = nowMs();
                 countdownStartsAudio = true;
                 scene = Scene::Countdown;

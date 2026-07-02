@@ -8,12 +8,12 @@ project(VitaMania LANGUAGES C CXX)
 
 option(VITAMANIA_NO_AVPLAYER "Build without Vita AvPlayer audio imports" OFF)
 
-set(VITA_APP_NAME "VitaMania")
+set(VITA_APP_NAME "vitaMania!")
 set(VITA_TITLEID "VTMN00002")
-set(VITA_VERSION "01.16")
+set(VITA_VERSION "01.22")
 
 if(VITAMANIA_NO_AVPLAYER)
-  set(VITA_APP_NAME "VitaMania Lite")
+  set(VITA_APP_NAME "vitaMania! Lite")
   set(VITA_TITLEID "VTMN00003")
 endif()
 
